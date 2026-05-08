@@ -1,0 +1,333 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: VPC + S3 Files (FileSystem + MountTargets + AccessPoint) for AgentCore Runtime verification
+
+Parameters:
+  Suffix:
+    Type: String
+    Default: fsverify
+
+Resources:
+  # ---- VPC ----
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-vpc"}]
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-igw"}]
+
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  # ---- Private subnets (AgentCore Runtime ENI + S3 Files Mount Target) ----
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-private-a"}]
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-private-b"}]
+
+  # ---- Public subnets (for NAT Gateway) ----
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.101.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-public-a"}]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.102.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-public-b"}]
+
+  # ---- NAT Gateway (in PublicSubnetA) ----
+  EipNat:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-eip-nat"}]
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: IgwAttach
+    Properties:
+      AllocationId: !GetAtt EipNat.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-nat"}]
+
+  # ---- Public route table ----
+  PublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-public-rt"}]
+
+  PublicRtIgwRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId: !Ref PublicRt
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  PublicRtAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRt
+
+  PublicRtAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRt
+
+  # ---- Private route table (NAT + S3 Gateway Endpoint) ----
+  Rt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-private-rt"}]
+
+  RtDefault:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref Rt
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  RtAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref Rt
+
+  RtAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref Rt
+
+  # ---- Security Group (self-referenced NFS 2049) ----
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${Suffix} S3 Files NFS"
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "${Suffix}-sg"}]
+
+  SgIngressNfsSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref Sg
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref Sg
+
+  # ---- S3 Gateway VPC Endpoint (free, used for ECR layer pulls) ----
+  EndpointS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref Rt]
+
+  # ---- S3 bucket (versioning + SSE-S3) ----
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${Suffix}-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # ---- IAM role assumed by S3 Files service ----
+  S3FilesServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Suffix}-s3files-service-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: elasticfilesystem.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {aws:SourceAccount: !Ref AWS::AccountId}
+              ArnLike: {aws:SourceArn: !Sub "arn:aws:s3files:${AWS::Region}:${AWS::AccountId}:file-system/*"}
+      Policies:
+        - PolicyName: s3files-bucket-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3BucketPermissions
+                Effect: Allow
+                Action: [s3:ListBucket, s3:ListBucketVersions]
+                Resource: !GetAtt Bucket.Arn
+                Condition:
+                  StringEquals: {aws:ResourceAccount: !Ref AWS::AccountId}
+              - Sid: S3ObjectPermissions
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject*
+                  - s3:GetObject*
+                  - s3:List*
+                  - s3:PutObject*
+                Resource: !Sub "${Bucket.Arn}/*"
+                Condition:
+                  StringEquals: {aws:ResourceAccount: !Ref AWS::AccountId}
+              - Sid: EventBridgeManage
+                Effect: Allow
+                Action: [events:DeleteRule, events:DisableRule, events:EnableRule, events:PutRule, events:PutTargets, events:RemoveTargets]
+                Condition:
+                  StringEquals: {events:ManagedBy: elasticfilesystem.amazonaws.com}
+                Resource: arn:aws:events:*:*:rule/DO-NOT-DELETE-S3-Files*
+              - Sid: EventBridgeRead
+                Effect: Allow
+                Action: [events:DescribeRule, events:ListRuleNamesByTarget, events:ListRules, events:ListTargetsByRule]
+                Resource: arn:aws:events:*:*:rule/*
+
+  # ---- S3 Files: FileSystem ----
+  FileSystem:
+    Type: AWS::S3Files::FileSystem
+    DependsOn: S3FilesServiceRole
+    Properties:
+      Bucket: !GetAtt Bucket.Arn
+      RoleArn: !GetAtt S3FilesServiceRole.Arn
+      AcceptBucketWarning: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${Suffix}-fs"
+
+  # ---- S3 Files: Mount Targets (one per private subnet) ----
+  MountTargetA:
+    Type: AWS::S3Files::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref SubnetA
+      SecurityGroups: [!Ref Sg]
+
+  MountTargetB:
+    Type: AWS::S3Files::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref SubnetB
+      SecurityGroups: [!Ref Sg]
+
+  # ---- S3 Files: Access Point ----
+  AccessPoint:
+    Type: AWS::S3Files::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser:
+        Uid: 1000
+        Gid: 1000
+      RootDirectory:
+        Path: /agent
+        CreationPermissions:
+          OwnerUid: 1000
+          OwnerGid: 1000
+          Permissions: "0755"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Suffix}-ap"
+
+  # ---- AgentCore Runtime role ----
+  RuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Suffix}-runtime-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {aws:SourceAccount: !Ref AWS::AccountId}
+              ArnLike: {aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"}
+      Policies:
+        - PolicyName: ecr-pull
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:GetAuthorizationToken]
+                Resource: "*"
+        - PolicyName: cloudwatch-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+        - PolicyName: workload-identity
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                  - bedrock-agentcore:GetWorkloadAccessTokenForUserId
+                Resource: "*"
+        - PolicyName: s3files-client
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3files:*, elasticfilesystem:*]
+                Resource: "*"
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*anthropic.claude-*"
+
+Outputs:
+  VpcId: {Value: !Ref Vpc}
+  SubnetIds: {Value: !Sub "${SubnetA},${SubnetB}"}
+  SecurityGroupId: {Value: !Ref Sg}
+  BucketName: {Value: !Ref Bucket}
+  FileSystemId: {Value: !Ref FileSystem}
+  AccessPointArn: {Value: !GetAtt AccessPoint.AccessPointArn}
+  RuntimeRoleArn: {Value: !GetAtt RuntimeRole.Arn}

@@ -1,0 +1,14 @@
+[project]
+name = "agentcore-filesysytem"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.43.5",
+    "claude-agent-sdk>=0.1.76",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple/"
+default = true
