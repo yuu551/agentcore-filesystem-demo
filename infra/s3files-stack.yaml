@@ -311,6 +311,22 @@ Resources:
               - Effect: Allow
                 Action: [s3files:*, elasticfilesystem:*]
                 Resource: "*"
+        - PolicyName: observability
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals: {"cloudwatch:namespace": "bedrock-agentcore"}
         - PolicyName: bedrock-invoke
           PolicyDocument:
             Version: "2012-10-17"
