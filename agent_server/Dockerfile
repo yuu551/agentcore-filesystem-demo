@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir \
         'claude-agent-sdk>=0.1.76' \
-        'bedrock-agentcore>=1.9.0'
+        'bedrock-agentcore>=1.9.0' \
+        'aws-opentelemetry-distro>=0.14.1'
+RUN opentelemetry-bootstrap -a install
 
 # S3 Files の access point posixUser に合わせて uid 1000 で動かす
 RUN groupadd -g 1000 agent && useradd -m -u 1000 -g agent agent
@@ -20,4 +22,4 @@ ENV HOME=/home/agent
 COPY --chown=agent:agent main.py /home/agent/main.py
 
 EXPOSE 8080
-CMD ["python", "/home/agent/main.py"]
+CMD ["opentelemetry-instrument", "python", "/home/agent/main.py"]

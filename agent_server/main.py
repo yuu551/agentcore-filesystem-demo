@@ -27,6 +27,8 @@ async def invoke(payload, context=None):
         env={
             "CLAUDE_CODE_USE_BEDROCK": "1",
             "AWS_REGION": "us-east-1",
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+            "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
         },
         model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     )
