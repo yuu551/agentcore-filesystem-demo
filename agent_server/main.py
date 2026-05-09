@@ -13,6 +13,15 @@ from claude_agent_sdk import (
 
 MOUNT = os.environ.get("MOUNT_PATH", "/mnt/data")
 
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ADOT が設定する OTEL 環境変数をダンプ
+for k, v in sorted(os.environ.items()):
+    if "OTEL" in k or "TRACE" in k or "AWS_DISTRO" in k or "ADOT" in k or "DISABLE" in k:
+        logger.info(f"ENV: {k}={v}")
+
 app = BedrockAgentCoreApp()
 
 
